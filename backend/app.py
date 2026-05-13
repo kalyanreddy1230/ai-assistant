@@ -139,6 +139,32 @@ scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
 # AI Functions
+def get_groq_response_with_prompt(system_prompt):
+    """Get response from Groq with full custom prompt"""
+    try:
+        if not GROQ_API_KEY:
+            return None
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": system_prompt}],
+            "temperature": 0.7,
+            "max_tokens": 200
+        }
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if 'choices' in data and len(data['choices']) > 0:
+                return data['choices'][0]['message']['content']
+        return None
+    except Exception as e:
+        print(f"Groq Error: {str(e)}")
+        return None
+
 def get_groq_response(message, user_name):
     """Get response from Groq API"""
     try:
@@ -151,12 +177,15 @@ def get_groq_response(message, user_name):
             "Content-Type": "application/json"
         }
         
+        from datetime import datetime
+        import pytz
+        current_time = datetime.now().strftime("%I:%M %p")
         payload = {
-            "model": "mixtral-8x7b-32768",
+            "model": "llama-3.3-70b-versatile",
             "messages": [
                 {
                     "role": "user",
-                    "content": f"You are a helpful AI personal assistant for {user_name}. Be friendly and conversational. Keep responses short (under 150 words). User: {message}"
+                    "content": f"You are a helpful AI personal assistant for {user_name}. The current time is {current_time}. Be friendly and conversational. Keep responses short (under 150 words). User: {message}"
                 }
             ],
             "temperature": 0.7,
@@ -334,26 +363,90 @@ def assistant_chat():
     try:
         user = User.query.filter_by(user_id='user1').first()
         user_name = user.name if user else 'friend'
-        ai_provider = user.ai_provider if user else 'groq'
-        
-        # Try primary AI first, fallback to secondary
-        if ai_provider == 'groq':
-            ai_response = get_groq_response(user_message, user_name)
-            if not ai_response:
-                ai_response = get_huggingface_response(user_message, user_name)
-        else:
-            ai_response = get_huggingface_response(user_message, user_name)
-            if not ai_response:
-                ai_response = get_groq_response(user_message, user_name)
-        
+
+        # Get real reminders and meetings from database
+        reminders = Reminder.query.filter_by(user_id='user1', is_active=True).all()
+        meetings = Meeting.query.filter(Meeting.start_time > datetime.utcnow()).all()
+
+        reminders_text = "No reminders." if not reminders else ", ".join([f"{r.title} at {r.reminder_time.strftime('%I:%M %p on %b %d')}" for r in reminders])
+        meetings_text = "No meetings." if not meetings else ", ".join([f"{m.title} at {m.start_time.strftime('%I:%M %p on %b %d')}" for m in meetings])
+
+        current_time = datetime.now().strftime("%I:%M %p")
+        current_date = datetime.now().strftime("%A, %B %d, %Y")
+
+        system_prompt = f"""You are a smart personal assistant for {user_name}.
+Current time: {current_time}
+Current date: {current_date}
+Real reminders: {reminders_text}
+Real meetings: {meetings_text}
+
+RULES:
+1. NEVER make up fake reminders or meetings. Only use the real ones above.
+2. If user asks to set a reminder, reply EXACTLY in this format:
+   SAVE_REMINDER: title="<title>" time="<YYYY-MM-DD HH:MM>"
+3. If user asks to set a meeting, reply EXACTLY in this format:
+   SAVE_MEETING: title="<title>" time="<YYYY-MM-DD HH:MM>"
+4. Answer any general question normally.
+5. Keep replies short and friendly.
+
+User: {user_message}"""
+
+        ai_response = get_groq_response_with_prompt(system_prompt)
+
         if not ai_response:
-            ai_response = f"Hi {user_name}! I'm here to help with your schedule, reminders, and meetings. What would you like to do?"
-        
+            ai_response = f"Sorry {user_name}, I had trouble processing that. Please try again."
+
+        # Check if AI wants to save a reminder
+        if 'SAVE_REMINDER:' in ai_response:
+            try:
+                import re
+                title_match = re.search(r'title="([^"]+)"', ai_response)
+                time_match = re.search(r'time="([^"]+)"', ai_response)
+                if title_match and time_match:
+                    title = title_match.group(1)
+                    reminder_time = datetime.fromisoformat(time_match.group(1))
+                    reminder = Reminder(
+                        user_id='user1',
+                        title=title,
+                        description='',
+                        reminder_time=reminder_time,
+                        notification_before=10,
+                        is_active=True
+                    )
+                    db.session.add(reminder)
+                    db.session.commit()
+                    ai_response = f"Got it {user_name}! Reminder set: '{title}' at {reminder_time.strftime('%I:%M %p on %b %d')} ✅"
+            except Exception as ex:
+                print(f"Reminder save error: {ex}")
+
+        # Check if AI wants to save a meeting
+        if 'SAVE_MEETING:' in ai_response:
+            try:
+                import re
+                title_match = re.search(r'title="([^"]+)"', ai_response)
+                time_match = re.search(r'time="([^"]+)"', ai_response)
+                if title_match and time_match:
+                    title = title_match.group(1)
+                    start_time = datetime.fromisoformat(time_match.group(1))
+                    end_time = start_time.replace(hour=start_time.hour+1)
+                    meeting = Meeting(
+                        user_id='user1',
+                        title=title,
+                        description='',
+                        start_time=start_time,
+                        end_time=end_time,
+                        source='voice'
+                    )
+                    db.session.add(meeting)
+                    db.session.commit()
+                    ai_response = f"Done {user_name}! Meeting scheduled: '{title}' at {start_time.strftime('%I:%M %p on %b %d')} 📅"
+            except Exception as ex:
+                print(f"Meeting save error: {ex}")
+
         return jsonify({
             'success': True,
             'response': ai_response,
-            'user_name': user_name,
-            'ai_provider': ai_provider
+            'user_name': user_name
         }), 200
     
     except Exception as e:

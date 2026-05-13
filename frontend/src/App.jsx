@@ -17,6 +17,72 @@ function App() {
 
   const API_BASE_URL = 'http://localhost:5000/api';
 
+  // Request notification permission and check reminders
+  useEffect(() => {
+    if ('Notification' in window) {
+      Notification.requestPermission();
+    }
+
+    const checkReminders = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/reminders`);
+        const reminders = await response.json();
+        const now = new Date();
+        reminders.forEach(reminder => {
+          const reminderTime = new Date(reminder.reminder_time);
+          const diff = reminderTime - now;
+          if (diff > 0 && diff <= 10 * 60 * 1000 && !reminder.notified) {
+            if (Notification.permission === 'granted') {
+              new Notification('Reminder: ' + reminder.title, {
+                body: 'Coming up in ' + Math.round(diff / 60000) + ' minutes!',
+                icon: '🔔'
+              });
+            }
+            speak('Hey Kalyan, reminder: ' + reminder.title + ' is coming up soon!');
+          }
+        });
+      } catch (error) {
+        console.error('Reminder check error:', error);
+      }
+    };
+
+    const interval = setInterval(checkReminders, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Request notification permission and check reminders
+  useEffect(() => {
+    if ('Notification' in window) {
+      Notification.requestPermission();
+    }
+
+    const checkReminders = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/reminders`);
+        const reminders = await response.json();
+        const now = new Date();
+        reminders.forEach(reminder => {
+          const reminderTime = new Date(reminder.reminder_time);
+          const diff = reminderTime - now;
+          if (diff > 0 && diff <= 10 * 60 * 1000 && !reminder.notified) {
+            if (Notification.permission === 'granted') {
+              new Notification('Reminder: ' + reminder.title, {
+                body: 'Coming up in ' + Math.round(diff / 60000) + ' minutes!',
+                icon: '🔔'
+              });
+            }
+            speak('Hey Kalyan, reminder: ' + reminder.title + ' is coming up soon!');
+          }
+        });
+      } catch (error) {
+        console.error('Reminder check error:', error);
+      }
+    };
+
+    const interval = setInterval(checkReminders, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
   // Initialize voice recognition
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -41,12 +107,10 @@ function App() {
         }
 
         if (event.results[event.results.length - 1].isFinal) {
-          if (transcript.toLowerCase().includes('hey ai') || transcript.toLowerCase().includes('hey assistant')) {
-            const command = transcript.toLowerCase().replace('hey ai', '').replace('hey assistant', '').trim();
-            if (command) {
-              setInputValue(command);
-              handleSendMessage(null, command);
-            }
+          if (transcript.trim()) {
+            setInputValue(transcript.trim());
+            handleSendMessage(null, transcript.trim());
+            recognitionRef.current.stop(); // stop after each command
           }
         }
       };
@@ -90,12 +154,33 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
+  const speak = (text) => {
+    if (!('speechSynthesis' in window)) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = 0.95;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    const trySpeak = () => {
+      const voices = window.speechSynthesis.getVoices();
+      const preferred = voices.find(v => v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Alex'));
+      if (preferred) utterance.voice = preferred;
+      window.speechSynthesis.speak(utterance);
+    };
+    if (window.speechSynthesis.getVoices().length > 0) {
+      trySpeak();
+    } else {
+      window.speechSynthesis.onvoiceschanged = trySpeak;
+    }
+  };
+
   const addBotMessage = (text) => {
     setMessages(prev => [...prev, {
       id: prev.length + 1,
       type: 'bot',
       text: text
     }]);
+    speak(text); // 🔊 speak every bot message
   };
 
   const fetchReminders = async () => {
@@ -163,22 +248,7 @@ function App() {
     const message = messageText || inputValue.trim();
     if (!message) return;
 
-    // If no user name, save it
-    if (!userName) {
-      try {
-        await fetch(`${API_BASE_URL}/user`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name: message, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })
-        });
-        setUserName(message);
-        addBotMessage(`Nice to meet you, ${message}! 👋 I'm your AI assistant. How can I help you today?`);
-        setInputValue('');
-        return;
-      } catch (error) {
-        console.error('Error saving user:', error);
-      }
-    }
+
 
     const userMessage = {
       id: messages.length + 1,
